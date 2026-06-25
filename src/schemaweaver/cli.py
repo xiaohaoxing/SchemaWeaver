@@ -88,9 +88,9 @@ def extract(repo_root, alias, orm, domain_map, db):
 @click.option("--db", default="~/.schemaweaver/schemaweaver.db", help="SQLite DB path")
 def mcp(db):
     """Start MCP server (stdio)."""
-    console.print("[yellow]MCP server not yet implemented (Phase 2)[/yellow]")
-    # from .mcp_server import build_server
-    # build_server(db).run(transport="stdio")
+    from .mcp_server import build_server
+    server = build_server(db)
+    server.run(transport="stdio")
 
 
 @main.command(name="list")
