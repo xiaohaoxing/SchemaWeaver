@@ -30,7 +30,7 @@ def build_server(db_path: str | Path) -> FastMCP:
         domain: str | None = None,
         limit: int = 10,
     ) -> dict:
-        """Search tables by natural language query (FTS5 BM25).
+        """SchemaWeaver schema_search: search tables by natural language query (FTS5 BM25).
 
         Returns ranked candidate tables with purpose, domain, soft-delete flag,
         and dimension fields.
@@ -98,7 +98,10 @@ def build_server(db_path: str | Path) -> FastMCP:
         table: str,
         repo: str | None = None,
     ) -> dict:
-        """Get full details for a single table: columns, enum bindings, relations, traps.
+        """SchemaWeaver table_detail: get full details for a single table.
+
+        Includes columns, enum bindings, relations, traps, soft-delete guidance,
+        and dimension-filter guidance.
 
         Args:
             table: Physical table name (e.g. "pcl_order")
@@ -218,7 +221,9 @@ def build_server(db_path: str | Path) -> FastMCP:
         column: str | None = None,
         repo: str | None = None,
     ) -> dict:
-        """Resolve enum codes to meanings. Handles Paradigm B aggregator divergence.
+        """SchemaWeaver enum_resolve: resolve enum codes to meanings.
+
+        Handles Paradigm B aggregator divergence.
 
         Provide either `enum_class` OR both `table` + `column`.
 
@@ -303,7 +308,9 @@ def build_server(db_path: str | Path) -> FastMCP:
         repo: str | None = None,
         aggregator_context: int | None = None,
     ) -> dict:
-        """Pre-flight SQL grounding check: column existence, enum ambiguity, dimension filters.
+        """SchemaWeaver sql_grounding_check: pre-flight SQL grounding check.
+
+        Checks column existence, enum ambiguity, and dimension filters.
 
         Detects:
         - Column missing (including soft-delete column misuse)
