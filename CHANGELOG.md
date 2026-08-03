@@ -3,6 +3,17 @@
 All notable changes to SchemaWeaver are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.1.1] - 2026-08-03
+
+### Added
+- Live MySQL `information_schema` synchronization via `schemaweaver sync-live`.
+- Separate live-schema indexes for test and production databases while preserving source-code business semantics.
+- Configurable stale-index warnings via `SCHEMAWEAVER_STALE_DAYS` (default: 7 days).
+- PyMySQL as the live-sync database driver.
+
+### Changed
+- MCP tool responses now include a stale-index warning when the selected index is too old.
+
 ## [0.1.0] - 2026-06-25
 
 ### Added
