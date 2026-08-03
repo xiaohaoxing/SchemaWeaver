@@ -1,5 +1,4 @@
 """Extraction pipeline: orchestrate adapter dispatch + semantic layer + storage."""
-import re
 from pathlib import Path
 from dataclasses import dataclass
 from .model import Table, EnumDef, I18nKey
@@ -81,7 +80,6 @@ class ExtractionPipeline:
         # high: column name matches enum short_name + column type is Short/Integer + same domain has enum class
         # declared: ORM annotation (not implemented in tkmybatis)
         # low: weak match (type/weak naming)
-        enum_short_names = {e.short_name.lower(): e.enum_class for e in enums}
         for t in tables:
             for c in t.columns:
                 if c.enum_class:

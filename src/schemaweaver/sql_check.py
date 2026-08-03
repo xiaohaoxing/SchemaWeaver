@@ -176,7 +176,7 @@ class SqlGroundingChecker:
                             table=table_name,
                             column=col_name,
                             message=f"列 `{col_name}` 在表 `{table_name}` 中不存在",
-                            fix=f"检查列名拼写，或用 table_detail 查询该表的完整列列表",
+                            fix="检查列名拼写，或用 table_detail 查询该表的完整列列表",
                         ))
 
             # 3b. Enum value ambiguity check (Paradigm B)
