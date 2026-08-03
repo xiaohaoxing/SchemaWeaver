@@ -4,7 +4,8 @@ import json
 from pathlib import Path
 from datetime import datetime
 import jieba
-from .model import Table, EnumDef, I18nKey
+from .model import EnumDef, I18nKey, Table
+from .live_sync import LiveTable, normalize_mysql_type, stale_warning
 
 
 def _tokenize_zh(text: str) -> str:
@@ -23,6 +24,7 @@ class SchemaStore:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(db_path))
+        self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self._init_schema()
 
@@ -155,6 +157,17 @@ class SchemaStore:
         """)
         self.conn.commit()
 
+        # These columns were added after the original static extractor. Keep
+        # existing databases compatible without requiring a destructive rebuild.
+        repo_columns = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(repos)").fetchall()
+        }
+        if "schema_source" not in repo_columns:
+            self.conn.execute("ALTER TABLE repos ADD COLUMN schema_source TEXT")
+        if "schema_environment" not in repo_columns:
+            self.conn.execute("ALTER TABLE repos ADD COLUMN schema_environment TEXT")
+        self.conn.commit()
+
     def save_repo(self, repo_id: str, repo_root: Path, tables: list[Table],
                   enums: list[EnumDef], i18n_keys: dict[str, I18nKey],
                   extractor_ver: str, domain_map: dict | None = None):
@@ -229,8 +242,148 @@ class SchemaStore:
         # Rebuild FTS
         self.rebuild_fts(repo_id)
 
-    def rebuild_fts(self, repo_id: str):
-        """Rebuild FTS5 indexes for a repo (with jieba pre-tokenization)."""
+    def sync_live_schema(
+        self,
+        repo_id: str,
+        live_tables: list[LiveTable],
+        source_env: str,
+    ) -> None:
+        """Overlay physical schema from a live database while keeping semantics."""
+        repo = self.conn.execute(
+            "SELECT root_path, extractor_ver, domain_map FROM repos WHERE repo_id = ?",
+            (repo_id,),
+        ).fetchone()
+        if repo is None:
+            raise ValueError(f"Repo '{repo_id}' is not indexed; run extract first")
+
+        domain_map = json.loads(repo[2] or "{}")
+        existing_tables = {
+            row["name"]: row
+            for row in self.conn.execute(
+                "SELECT * FROM tables WHERE repo_id = ?", (repo_id,)
+            ).fetchall()
+        }
+        live_names = {table.name for table in live_tables}
+
+        for table in live_tables:
+            existing = existing_tables.get(table.name)
+            if existing is None:
+                domain = _infer_domain(table.name, domain_map)
+                dimension_fields = [
+                    column.name
+                    for column in table.columns
+                    if column.name in {
+                        "shipper", "shipper_id", "party_id", "seller_party_id",
+                        "aggregator", "tenant_id", "org_id",
+                    }
+                ]
+                self.conn.execute(
+                    """
+                    INSERT INTO tables (
+                        repo_id, name, entity_class, source_file, purpose, domain,
+                        extends_base, soft_delete_column, dimension_fields
+                    ) VALUES (?, ?, '', '', ?, ?, 0, ?, ?)
+                    """,
+                    (
+                        repo_id,
+                        table.name,
+                        table.comment,
+                        domain,
+                        _find_soft_delete(table),
+                        json.dumps(dimension_fields),
+                    ),
+                )
+            else:
+                purpose = existing["purpose"] or table.comment
+                domain = existing["domain"] or _infer_domain(table.name, domain_map)
+                self.conn.execute(
+                    "UPDATE tables SET purpose = ?, domain = ? WHERE repo_id = ? AND name = ?",
+                    (purpose, domain, repo_id, table.name),
+                )
+
+            old_columns = {
+                row["name"]: row
+                for row in self.conn.execute(
+                    "SELECT * FROM columns WHERE repo_id = ? AND table_name = ?",
+                    (repo_id, table.name),
+                ).fetchall()
+            }
+            self.conn.execute(
+                "DELETE FROM columns WHERE repo_id = ? AND table_name = ?",
+                (repo_id, table.name),
+            )
+            for live_column in table.columns:
+                old = old_columns.get(live_column.name)
+                self.conn.execute(
+                    """
+                    INSERT INTO columns (
+                        repo_id, table_name, name, java_field, type_raw, type,
+                        is_pk, is_nullable, comment, name_inferred, from_base_entity,
+                        enum_class, ordinal
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        repo_id,
+                        table.name,
+                        live_column.name,
+                        old["java_field"] if old else live_column.name,
+                        live_column.column_type,
+                        normalize_mysql_type(live_column.data_type).value,
+                        int(live_column.is_primary_key),
+                        int(live_column.is_nullable),
+                        live_column.comment or (old["comment"] if old else ""),
+                        old["name_inferred"] if old else 0,
+                        old["from_base_entity"] if old else 0,
+                        old["enum_class"] if old else None,
+                        live_column.ordinal,
+                    ),
+                )
+
+            self.conn.execute(
+                """
+                UPDATE tables
+                SET soft_delete_column = ?, dimension_fields = ?
+                WHERE repo_id = ? AND name = ?
+                """,
+                (
+                    existing["soft_delete_column"] if existing and existing["soft_delete_column"] in {c.name for c in table.columns} else _find_soft_delete(table),
+                    json.dumps(
+                        json.loads(existing["dimension_fields"] or "[]")
+                        if existing and json.loads(existing["dimension_fields"] or "[]")
+                        else [c.name for c in table.columns if c.name in {"shipper", "shipper_id", "party_id", "seller_party_id", "aggregator", "tenant_id", "org_id"}]
+                    ),
+                    repo_id,
+                    table.name,
+                ),
+            )
+
+        # A live sync is authoritative for physical tables: remove tables that
+        # disappeared from the target database, but keep curated table_meta.
+        for name in set(existing_tables) - live_names:
+            self.conn.execute(
+                "DELETE FROM tables WHERE repo_id = ? AND name = ?", (repo_id, name)
+            )
+
+        now = datetime.now().isoformat()
+        self.conn.execute(
+            """
+            UPDATE repos
+            SET extracted_at = ?, table_count = ?, schema_source = ?, schema_environment = ?
+            WHERE repo_id = ?
+            """,
+            (now, len(live_tables), "mysql_information_schema", source_env, repo_id),
+        )
+        self.conn.commit()
+        self.rebuild_fts(repo_id)
+
+    def repo_stale_warning(self, repo_id: str, stale_days: int = 7):
+        row = self.conn.execute(
+            "SELECT extracted_at FROM repos WHERE repo_id = ?", (repo_id,)
+        ).fetchone()
+        return stale_warning(row[0], stale_days) if row else None
+
+    def rebuild_fts(self, repo_id: str | None = None):
+        """Rebuild FTS5 indexes without dropping entries for other repos."""
         # Drop and recreate FTS tables (simpler than DELETE which has complex FTS5 syntax)
         self.conn.executescript("""
             DROP TABLE IF EXISTS tables_fts;
@@ -253,39 +406,55 @@ class SchemaStore:
             );
         """)
 
-        # Populate tables_fts (pre-tokenize Chinese)
+        # Populate tables_fts (pre-tokenize Chinese). Rebuild all repos because
+        # the standalone FTS tables are shared by every repo_id.
         for row in self.conn.execute("""
-            SELECT name, purpose, domain FROM tables WHERE repo_id = ?
-        """, (repo_id,)):
-            name, purpose, domain = row
+            SELECT repo_id, name, purpose, domain FROM tables
+            ORDER BY repo_id, name
+        """):
+            current_repo, name, purpose, domain = row
             purpose_tok = _tokenize_zh(purpose)
             self.conn.execute("""
                 INSERT INTO tables_fts (repo_id, table_name, purpose, domain)
                 VALUES (?, ?, ?, ?)
-            """, (repo_id, name, purpose_tok, domain))
+            """, (current_repo, name, purpose_tok, domain))
 
         # Populate columns_fts (pre-tokenize Chinese comments)
         for row in self.conn.execute("""
-            SELECT table_name, name, comment, type FROM columns WHERE repo_id = ?
-        """, (repo_id,)):
-            table_name, col_name, comment, col_type = row
+            SELECT repo_id, table_name, name, comment, type FROM columns
+            ORDER BY repo_id, table_name, ordinal
+        """):
+            current_repo, table_name, col_name, comment, col_type = row
             comment_tok = _tokenize_zh(comment)
             self.conn.execute("""
                 INSERT INTO columns_fts (repo_id, table_name, col_name, comment, col_type)
                 VALUES (?, ?, ?, ?, ?)
-            """, (repo_id, table_name, col_name, comment_tok, col_type))
+            """, (current_repo, table_name, col_name, comment_tok, col_type))
 
         # Populate enums_fts
         for row in self.conn.execute("""
-            SELECT short_name, enum_class FROM enums WHERE repo_id = ?
-        """, (repo_id,)):
-            short_name, enum_class = row
+            SELECT repo_id, short_name, enum_class FROM enums
+            ORDER BY repo_id, enum_class
+        """):
+            current_repo, short_name, enum_class = row
             self.conn.execute("""
                 INSERT INTO enums_fts (repo_id, short_name, enum_class)
                 VALUES (?, ?, ?)
-            """, (repo_id, short_name, enum_class))
+            """, (current_repo, short_name, enum_class))
 
         self.conn.commit()
 
     def close(self):
         self.conn.close()
+
+
+def _infer_domain(table_name: str, domain_map: dict[str, str]) -> str:
+    for prefix, domain in sorted(domain_map.items(), key=lambda item: -len(item[0])):
+        if table_name.startswith(prefix):
+            return domain
+    return ""
+
+
+def _find_soft_delete(table: LiveTable) -> str | None:
+    names = {"deleted", "is_deleted", "del_flag", "is_del", "is_active"}
+    return next((column.name for column in table.columns if column.name in names), None)

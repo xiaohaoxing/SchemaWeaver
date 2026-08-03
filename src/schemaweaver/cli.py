@@ -5,6 +5,7 @@ from rich.console import Console
 from .pipeline import ExtractionPipeline
 from .adapters.base import load_adapters
 from .store import SchemaStore
+from .live_sync import connect_mysql, introspect_mysql, mysql_params_from_environment
 from . import __version__
 
 
@@ -71,7 +72,7 @@ def extract(repo_root, alias, orm, domain_map, db):
     )
     report = pipeline.run()
 
-    console.print(f"[green]✓ Extraction complete[/green]")
+    console.print("[green]✓ Extraction complete[/green]")
     console.print(f"  Tables: {report.tables}")
     console.print(f"  Enums: {report.enums}")
     console.print(f"  Relations: {report.relations}")
@@ -82,6 +83,63 @@ def extract(repo_root, alias, orm, domain_map, db):
             console.print(f"  - {w}")
         if len(report.warnings) > 5:
             console.print(f"  ... and {len(report.warnings) - 5} more")
+
+
+@main.command(name="sync-live")
+@click.option("--env", type=click.Choice(["test", "prod"]), required=True)
+@click.option("--source-repo", type=click.Path(exists=True, path_type=Path), required=True,
+              help="Source repository used to preserve ORM business semantics")
+@click.option("--alias", required=True, help="Separate local alias for this environment")
+@click.option("--db", default="~/.schemaweaver/schemaweaver.db", help="SQLite DB path")
+@click.option("--host", help="Override MYSQL_<ENV>_HOST")
+@click.option("--port", type=int, help="Override MYSQL_<ENV>_PORT")
+@click.option("--user", help="Override MYSQL_<ENV>_USER")
+@click.option("--password", help="Override MYSQL_<ENV>_PASSWORD")
+@click.option("--database", help="Override MYSQL_<ENV>_DB")
+def sync_live(env, source_repo, alias, db, host, port, user, password, database):
+    """Refresh an index from a live MySQL database."""
+    db_path = Path(db).expanduser().resolve()
+    params = mysql_params_from_environment(env)
+    params.update({
+        key: value for key, value in {
+            "host": host,
+            "port": port,
+            "user": user,
+            "password": password,
+            "database": database,
+        }.items() if value is not None
+    })
+
+    registry = load_adapters()
+    if not registry.all():
+        raise click.ClickException("No adapters registered. Check entry_points.")
+    console.print(f"[bold]Extracting source semantics from {source_repo}[/bold]")
+    report = ExtractionPipeline(
+        repo_root=source_repo.resolve(),
+        registry=registry,
+        db_path=db_path,
+        repo_alias=alias,
+        extractor_ver=__version__,
+    ).run()
+    console.print(f"Source semantics: {report.tables} tables, {report.enums} enums")
+
+    connection = None
+    try:
+        console.print(f"[bold]Reading live schema ({env}) from {params['host']}:{params['port']}/{params['database']}[/bold]")
+        connection = connect_mysql(**params)
+        live_tables = introspect_mysql(connection, params["database"])
+    except Exception as exc:
+        raise click.ClickException(f"Live schema sync failed ({env}): {exc}") from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+    store = SchemaStore(db_path)
+    try:
+        store.sync_live_schema(alias, live_tables, env)
+    finally:
+        store.close()
+    console.print(f"[green]✓ Live schema sync complete[/green] {alias}: {len(live_tables)} tables")
 
 
 @main.command()

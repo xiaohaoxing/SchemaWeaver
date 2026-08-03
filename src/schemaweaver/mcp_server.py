@@ -4,6 +4,7 @@ import sqlite3
 from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 from .sql_check import SqlGroundingChecker
+from .live_sync import stale_warning
 
 
 def build_server(db_path: str | Path) -> FastMCP:
@@ -22,6 +23,29 @@ def build_server(db_path: str | Path) -> FastMCP:
             "SELECT repo_id FROM repos ORDER BY extracted_at DESC LIMIT 1"
         ).fetchone()
         return row["repo_id"] if row else None
+
+    def _with_stale_warning(
+        conn: sqlite3.Connection,
+        result: dict,
+        repo_id: str | None,
+    ) -> dict:
+        """Add an index-age notice to every successful tool response."""
+        if not repo_id:
+            return result
+        row = conn.execute(
+            "SELECT extracted_at FROM repos WHERE repo_id = ?", (repo_id,)
+        ).fetchone()
+        if row:
+            import os
+
+            try:
+                stale_days = int(os.environ.get("SCHEMAWEAVER_STALE_DAYS", "7"))
+            except ValueError:
+                stale_days = 7
+            warning = stale_warning(row["extracted_at"], stale_days)
+            if warning:
+                result["stale_warning"] = warning
+        return result
 
     @mcp.tool()
     def schema_search(
@@ -89,7 +113,11 @@ def build_server(db_path: str | Path) -> FastMCP:
                         "dimensions": json.loads(r["dimension_fields"]) if r["dimension_fields"] else [],
                     })
 
-            return {"candidates": candidates, "total": len(candidates), "repo": repo_id}
+            return _with_stale_warning(
+                conn,
+                {"candidates": candidates, "total": len(candidates), "repo": repo_id},
+                repo_id,
+            )
         finally:
             conn.close()
 
@@ -187,7 +215,7 @@ def build_server(db_path: str | Path) -> FastMCP:
             dims = json.loads(t["dimension_fields"]) if t["dimension_fields"] else []
             soft = t["soft_delete_column"]
 
-            return {
+            return _with_stale_warning(conn, {
                 "table": table,
                 "purpose": t["purpose"],
                 "domain": t["domain"],
@@ -210,7 +238,7 @@ def build_server(db_path: str | Path) -> FastMCP:
                 "query_templates": templates,
                 "coverage": "human_curated" if traps or templates else "auto_only",
                 "repo": repo_id,
-            }
+            }, repo_id)
         finally:
             conn.close()
 
@@ -287,7 +315,7 @@ def build_server(db_path: str | Path) -> FastMCP:
                     "warning": v["warning"],
                 })
 
-            return {
+            return _with_stale_warning(conn, {
                 "enum_class": e["enum_class"],
                 "short_name": e["short_name"],
                 "paradigm": e["paradigm"],
@@ -298,7 +326,7 @@ def build_server(db_path: str | Path) -> FastMCP:
                     "查询必须联合 aggregator 判断，否则误读。" if has_divergence else ""
                 ),
                 "repo": repo_id,
-            }
+            }, repo_id)
         finally:
             conn.close()
 
@@ -334,7 +362,7 @@ def build_server(db_path: str | Path) -> FastMCP:
             result = checker.check(sql, aggregator_context)
             plain_conn.close()
 
-            return {
+            return _with_stale_warning(conn, {
                 "verdict": result.verdict,
                 "checks": [
                     {
@@ -349,7 +377,7 @@ def build_server(db_path: str | Path) -> FastMCP:
                 ],
                 "parsed_tables": result.parsed_tables,
                 "repo": repo_id,
-            }
+            }, repo_id)
         finally:
             conn.close()
 

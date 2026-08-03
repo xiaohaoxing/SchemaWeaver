@@ -2,7 +2,7 @@
 
 **Static ORM-annotation → DB schema + business-semantics MCP server**
 
-SchemaWeaver extracts database schema and business semantics from source code ORM annotations — offline, without connecting to a running database — and exposes them as an [MCP](https://modelcontextprotocol.io) server for AI agents.
+SchemaWeaver extracts database schema and business semantics from source code ORM annotations, can refresh physical columns from a live MySQL database, and exposes them as an [MCP](https://modelcontextprotocol.io) server for AI agents.
 
 ## Why SchemaWeaver?
 
@@ -40,6 +40,9 @@ uv tool install schemaweaver
 # Extract schema from your repo
 schemaweaver extract /path/to/your/repo --alias myapp
 
+# Refresh physical schema from an existing MySQL test/prod database
+schemaweaver sync-live --env test --source-repo /path/to/your/repo --alias myapp-test
+
 # Start MCP server
 schemaweaver mcp
 ```
@@ -74,11 +77,21 @@ Or in `claude_desktop_config.json`:
 
 ```bash
 schemaweaver extract <repo_root> --alias <name>   # Extract schema (like gitnexus analyze)
+schemaweaver sync-live --env <test|prod> --source-repo <repo_root> --alias <name>  # Sync live MySQL schema
 schemaweaver mcp [--db <path>]                     # Start MCP server (stdio)
 schemaweaver list                                   # List indexed repos
 schemaweaver status <alias>                         # Show repo stats
 schemaweaver remove <alias>                         # Remove indexed repo
 ```
+
+`sync-live` reads `MYSQL_<ENV>_HOST`, `MYSQL_<ENV>_PORT`, `MYSQL_<ENV>_USER`,
+`MYSQL_<ENV>_PASSWORD`, and `MYSQL_<ENV>_DB`. The live database's physical table
+and column definitions are refreshed while source-code purposes, enum meanings,
+relations, and curated metadata are retained. Use `--host`, `--port`, `--user`,
+`--password`, or `--database` to override individual connection settings.
+
+MCP responses include `stale_warning` when the selected index is older than the
+configured threshold. Set `SCHEMAWEAVER_STALE_DAYS` to change the default of 7 days.
 
 ## MCP Tools
 
@@ -143,7 +156,7 @@ Want to add an ORM? See [CONTRIBUTING.md](CONTRIBUTING.md).
 | Dimension / tenant filter fields | ❌ | ✅ |
 | FK relations | ❌ | ✅ (inferred + declared) |
 | Known query traps / templates | ❌ | ✅ (human-curated `table_meta`) |
-| Requires DB connection | ✅ | ❌ |
+| Requires DB connection | ✅ | Only for `sync-live` |
 | Works with offline / read-only repos | ❌ | ✅ |
 
 ## Multi-Repo Support

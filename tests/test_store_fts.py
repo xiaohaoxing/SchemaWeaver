@@ -1,9 +1,8 @@
 """Tests for SQLite store and FTS5 search."""
 import pytest
-import tempfile
 from pathlib import Path
 from schemaweaver.store import SchemaStore
-from schemaweaver.model import Table, Column, EnumDef, EnumValue, EnumParadigm, ColType, I18nKey
+from schemaweaver.model import Table, Column, EnumDef, EnumValue, EnumParadigm, ColType
 
 
 @pytest.fixture
@@ -112,3 +111,14 @@ def test_replace_on_re_extract(store, sample_tables, sample_enums):
     store.save_repo("cfs", Path("/repo/cfs"), sample_tables, sample_enums, {}, "0.1.0")
     count = store.conn.execute("SELECT COUNT(*) FROM tables WHERE repo_id='cfs'").fetchone()[0]
     assert count == 2  # No duplicates
+
+
+def test_rebuild_fts_keeps_other_repo_entries(store, sample_tables, sample_enums):
+    store.save_repo("cfs", Path("/repo/cfs"), sample_tables, sample_enums, {}, "0.1.0")
+    store.save_repo("cfs-jiayou", Path("/repo/jiayou"), sample_tables, [], {}, "0.1.0")
+
+    rows = store.conn.execute(
+        "SELECT repo_id, table_name FROM tables_fts ORDER BY repo_id, table_name"
+    ).fetchall()
+
+    assert {row[0] for row in rows} == {"cfs", "cfs-jiayou"}

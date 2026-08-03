@@ -78,7 +78,7 @@ def load_adapters() -> AdapterRegistry:
         try:
             adapter_cls = ep.load()
             reg.register(adapter_cls())
-        except Exception as e:
+        except Exception:
             # Skip broken adapters gracefully
             pass
     return reg
